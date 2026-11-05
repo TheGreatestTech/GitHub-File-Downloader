@@ -21,30 +21,77 @@ jobs:
         run: |
           URL="${{ inputs.file_url }}"
 
-          # strip ?query and #fragment, then take the basename
           CLEAN="${URL%%\?*}"
           CLEAN="${CLEAN%%#*}"
           FILENAME=$(basename "$CLEAN")
 
-          # fallback if the URL ends in "/" or has no name
           if [ -z "$FILENAME" ] || [ "$FILENAME" = "/" ]; then
             FILENAME="download.bin"
           fi
 
-          # tag = filename without its extension (e.g. app-v1.2.3.zip -> app-v1.2.3)
           TAG="${FILENAME%.*}"
 
           echo "filename=$FILENAME" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "Will download '$FILENAME' and upload to release '$TAG'"
 
-      - name: Download remote file
+      - name: Download remote file (with ETA)
+        env:
+          URL: ${{ inputs.file_url }}
+          OUT: ${{ steps.meta.outputs.filename }}
         run: |
-          curl -L --fail --retry 3 \
-            -o "${{ steps.meta.outputs.filename }}" \
-            "${{ inputs.file_url }}"
+          set -euo pipefail
 
-          ls -lh "${{ steps.meta.outputs.filename }}"
+          hr() { numfmt --to=iec-i --suffix=B "$1" 2>/dev/null || echo "${1}B"; }
+          fmt_secs() {
+            local s=$1
+            if [ "$s" -ge 3600 ]; then
+              printf '%dh%02dm%02ds' $((s/3600)) $((s%3600/60)) $((s%60))
+            else
+              printf '%dm%02ds' $((s/60)) $((s%60))
+            fi
+          }
+
+          # Fetch total size from the final response (last Content-Length wins)
+          TOTAL=$(curl -sIL --retry 3 "$URL" \
+            | tr -d '\r' | tr 'A-Z' 'a-z' \
+            | awk -F': *' '/^content-length:/{v=$2} END{print v}')
+          case "$TOTAL" in ''|*[!0-9]*) TOTAL="" ;; esac
+          [ -n "$TOTAL" ] && echo "Total size: $(hr "$TOTAL")"
+
+          # Silent download in background
+          curl -sSL --fail --retry 3 -o "$OUT" "$URL" &
+          PID=$!
+
+          START=$(date +%s)
+          while kill -0 "$PID" 2>/dev/null; do
+            sleep 1
+            HAVE=$(stat -c%s "$OUT" 2>/dev/null || echo 0)
+            NOW=$(( $(date +%s) - START )); [ "$NOW" -gt 0 ] || NOW=1
+            RATE=$(( HAVE / NOW ))
+
+            if [ -n "$TOTAL" ] && [ "$TOTAL" -gt 0 ]; then
+              PCT=$(( HAVE * 100 / TOTAL )); [ "$PCT" -gt 100 ] && PCT=100
+              if [ "$RATE" -gt 0 ]; then
+                ETA=$(( (TOTAL - HAVE) / RATE )); [ "$ETA" -lt 0 ] && ETA=0
+                printf '%s / %s (%d%%) — ~%s left\n' \
+                  "$(hr "$HAVE")" "$(hr "$TOTAL")" "$PCT" "$(fmt_secs "$ETA")"
+              else
+                printf '%s / %s (%d%%) — estimating...\n' \
+                  "$(hr "$HAVE")" "$(hr "$TOTAL")" "$PCT"
+              fi
+            else
+              printf '%s downloaded — %s/s\n' "$(hr "$HAVE")" "$(hr "$RATE")"
+            fi
+          done
+
+          if ! wait "$PID"; then
+            echo "Download failed" >&2
+            exit 1
+          fi
+
+          echo "Done:"
+          ls -lh "$OUT"
 
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
