@@ -1,0 +1,54 @@
+name: Upload Remote File to Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      file_url:
+        description: 'Direct URL of the file to download'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  download-and-upload:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Derive filename and tag from URL
+        id: meta
+        run: |
+          URL="${{ inputs.file_url }}"
+
+          # strip ?query and #fragment, then take the basename
+          CLEAN="${URL%%\?*}"
+          CLEAN="${CLEAN%%#*}"
+          FILENAME=$(basename "$CLEAN")
+
+          # fallback if the URL ends in "/" or has no name
+          if [ -z "$FILENAME" ] || [ "$FILENAME" = "/" ]; then
+            FILENAME="download.bin"
+          fi
+
+          # tag = filename without its extension (e.g. app-v1.2.3.zip -> app-v1.2.3)
+          TAG="${FILENAME%.*}"
+
+          echo "filename=$FILENAME" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Will download '$FILENAME' and upload to release '$TAG'"
+
+      - name: Download remote file
+        run: |
+          curl -L --fail --retry 3 \
+            -o "${{ steps.meta.outputs.filename }}" \
+            "${{ inputs.file_url }}"
+
+          ls -lh "${{ steps.meta.outputs.filename }}"
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          files: ${{ steps.meta.outputs.filename }}
+          token: ${{ secrets.GITHUB_TOKEN }}
